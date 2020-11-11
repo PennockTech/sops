@@ -87,7 +87,7 @@ func (key *MasterKey) encryptWithGPGBinary(dataKey []byte) error {
 }
 
 func getKeyFromKeyServer(fingerprint string) (openpgp.Entity, error) {
-	log.Warn("Deprecation Warning: GPG key fetching from a keyserver witihin sops will be removed in a future version of sops. See https://github.com/mozilla/sops/issues/727 for more information.")
+	log.WithField("missing-fp", fingerprint).Warn("Deprecation Warning: GPG key fetching from a keyserver within sops will be removed in a future version of sops. See https://github.com/mozilla/sops/issues/727 for more information.")
 
 	url := fmt.Sprintf("https://keys.openpgp.org/vks/v1/by-fingerprint/%s", fingerprint)
 	resp, err := http.Get(url)
@@ -113,6 +113,8 @@ func (key *MasterKey) getPubKey() (openpgp.Entity, error) {
 		if ok {
 			return entity, nil
 		}
+	} else {
+		log.WithError(err).Debug("failed to find public ring")
 	}
 	entity, err := getKeyFromKeyServer(key.Fingerprint)
 	if err != nil {
@@ -157,7 +159,10 @@ func (key *MasterKey) encryptWithCryptoOpenPGP(dataKey []byte) error {
 	return nil
 }
 
-// Encrypt encrypts the data key with the PGP key with the same fingerprint as the MasterKey. It looks for PGP public keys in $PGPHOME/pubring.gpg.
+// Encrypt encrypts the data key with the PGP key with the same fingerprint as the MasterKey.
+// It looks for PGP public keys in $GNUPGHOME/pubring.gpg.
+// WARNING: this is a deprecated-by-GnuPG historical keyring location and we do not support
+// using pubring.kbx.
 func (key *MasterKey) Encrypt(dataKey []byte) error {
 	openpgpErr := key.encryptWithCryptoOpenPGP(dataKey)
 	if openpgpErr == nil {
@@ -289,6 +294,7 @@ func (key *MasterKey) loadRing(path string) (openpgp.EntityList, error) {
 	if err != nil {
 		return keyring, err
 	}
+	log.WithField("file", path).WithField("key-count", len(keyring)).Debug("loaded public keyring")
 	return keyring, nil
 }
 
