@@ -116,6 +116,7 @@ func (key *MasterKey) getPubKey() (openpgp.Entity, error) {
 	} else {
 		log.WithError(err).Debug("failed to find public ring")
 	}
+	// Beware that returning errors here will probably be masked by GPG fallback.
 	entity, err := getKeyFromKeyServer(key.Fingerprint)
 	if err != nil {
 		return openpgp.Entity{},
@@ -307,10 +308,10 @@ func (key *MasterKey) pubRing() (openpgp.EntityList, error) {
 }
 
 func (key *MasterKey) fingerprintMap(ring openpgp.EntityList) map[string]openpgp.Entity {
-	fps := make(map[string]openpgp.Entity)
+	fps := make(map[string]openpgp.Entity, len(ring))
 	for _, entity := range ring {
-		fp := strings.ToUpper(hex.EncodeToString(entity.PrimaryKey.Fingerprint[:]))
 		if entity != nil {
+			fp := strings.ToUpper(hex.EncodeToString(entity.PrimaryKey.Fingerprint[:]))
 			fps[fp] = *entity
 		}
 	}
