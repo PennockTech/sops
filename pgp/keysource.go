@@ -14,6 +14,7 @@ import (
 	"os/user"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"os/exec"
@@ -27,6 +28,7 @@ import (
 )
 
 var log *logrus.Logger
+var sharedKeyRingPair KeyRingPair
 
 func init() {
 	log = logging.NewLogger("PGP")
@@ -37,6 +39,21 @@ type MasterKey struct {
 	Fingerprint  string
 	EncryptedKey string
 	CreationDate time.Time
+	KeyRingPair  *KeyRingPair
+}
+
+// KeyRingPair holds a public and a secret keyring, cached across calls so that we don't load N thousand keys repeatedly
+type KeyRingPair struct {
+	Secret KeyRing
+	Public KeyRing
+}
+
+// KeyRing is a list of loaded keys, with some safey state
+type KeyRing struct {
+	sync.RWMutex
+	List openpgp.EntityList
+	Done bool
+	Err  error
 }
 
 // EncryptedDataKey returns the encrypted data key this master key holds
@@ -106,7 +123,7 @@ func getKeyFromKeyServer(fingerprint string) (openpgp.Entity, error) {
 }
 
 func (key *MasterKey) getPubKey() (openpgp.Entity, error) {
-	ring, err := key.pubRing()
+	ring, err := key.KeyRingPair.pubRing()
 	if err == nil {
 		fingerprints := key.fingerprintMap(ring)
 		entity, ok := fingerprints[key.Fingerprint]
@@ -207,7 +224,7 @@ func (key *MasterKey) decryptWithGPGBinary() ([]byte, error) {
 }
 
 func (key *MasterKey) decryptWithCryptoOpenpgp() ([]byte, error) {
-	ring, err := key.secRing()
+	ring, err := key.KeyRingPair.secRing()
 	if err != nil {
 		return nil, fmt.Errorf("Could not load secring: %s", err)
 	}
@@ -253,23 +270,12 @@ func (key *MasterKey) ToString() string {
 	return key.Fingerprint
 }
 
-func (key *MasterKey) gpgHome() string {
-	dir := os.Getenv("GNUPGHOME")
-	if dir == "" {
-		usr, err := user.Current()
-		if err != nil {
-			return path.Join(os.Getenv("HOME"), "/.gnupg")
-		}
-		return path.Join(usr.HomeDir, ".gnupg")
-	}
-	return dir
-}
-
 // NewMasterKeyFromFingerprint takes a PGP fingerprint and returns a new MasterKey with that fingerprint
 func NewMasterKeyFromFingerprint(fingerprint string) *MasterKey {
 	return &MasterKey{
 		Fingerprint:  strings.Replace(fingerprint, " ", "", -1),
 		CreationDate: time.Now().UTC(),
+		KeyRingPair:  &sharedKeyRingPair,
 	}
 }
 
@@ -285,7 +291,27 @@ func MasterKeysFromFingerprintString(fingerprint string) []*MasterKey {
 	return keys
 }
 
-func (key *MasterKey) loadRing(path string) (openpgp.EntityList, error) {
+func (krpair *KeyRingPair) secRing() (openpgp.EntityList, error) {
+	return krpair.Secret.Loaded(krpair.gpgHome() + "/secring.gpg")
+}
+
+func (krpair *KeyRingPair) pubRing() (openpgp.EntityList, error) {
+	return krpair.Public.Loaded(krpair.gpgHome() + "/pubring.gpg")
+}
+
+func (krpair *KeyRingPair) gpgHome() string {
+	dir := os.Getenv("GNUPGHOME")
+	if dir == "" {
+		usr, err := user.Current()
+		if err != nil {
+			return path.Join(os.Getenv("HOME"), "/.gnupg")
+		}
+		return path.Join(usr.HomeDir, ".gnupg")
+	}
+	return dir
+}
+
+func (kring *KeyRing) loadRing(path string) (openpgp.EntityList, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return openpgp.EntityList{}, err
@@ -299,12 +325,22 @@ func (key *MasterKey) loadRing(path string) (openpgp.EntityList, error) {
 	return keyring, nil
 }
 
-func (key *MasterKey) secRing() (openpgp.EntityList, error) {
-	return key.loadRing(key.gpgHome() + "/secring.gpg")
-}
-
-func (key *MasterKey) pubRing() (openpgp.EntityList, error) {
-	return key.loadRing(key.gpgHome() + "/pubring.gpg")
+func (kring *KeyRing) Loaded(path string) (openpgp.EntityList, error) {
+	kring.RLock()
+	if kring.Done {
+		el, err := kring.List, kring.Err
+		kring.RUnlock()
+		return el, err
+	}
+	kring.RUnlock()
+	kring.Lock()
+	defer kring.Unlock()
+	if kring.Done {
+		return kring.List, kring.Err
+	}
+	kring.List, kring.Err = kring.loadRing(path)
+	kring.Done = true
+	return kring.List, kring.Err
 }
 
 func (key *MasterKey) fingerprintMap(ring openpgp.EntityList) map[string]openpgp.Entity {
